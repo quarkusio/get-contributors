@@ -18,11 +18,11 @@ It generates CSV files with the following format:
 - The separator is `;`.
 - Some of the fields are enclosed with `"`.
 - The columns are:
-  . Name
-  . Email address if available
-  . GitHub handle if the email address is a GitHub noreply address (useful if we want to ping them in an issue to ask for their email address)
-  . Number of commits
-  . Repositories the user contributed to
+  - Name
+  - Email address if available
+  - GitHub handle if the email address is a GitHub noreply address (useful if we want to ping them in an issue to ask for their email address)
+  - Number of commits
+  - Repositories the user contributed to
 
 Three files are generated:
 
