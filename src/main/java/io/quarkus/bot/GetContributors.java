@@ -1,6 +1,7 @@
-//DEPS io.quarkus.platform:quarkus-bom:2.15.0.Final@pom
+//usr/bin/env jbang "$0" "$@" ; exit $?
+//DEPS io.quarkus.platform:quarkus-bom:3.0.2.Final@pom
 //DEPS io.quarkus:quarkus-picocli
-//DEPS io.quarkiverse.githubapi:quarkus-github-api:1.313.1
+//DEPS io.quarkiverse.githubapi:quarkus-github-api:1.314.1
 //DEPS net.gcardone.junidecode:junidecode:0.4.1
 
 //JAVAC_OPTIONS -parameters
@@ -35,25 +36,30 @@ import org.kohsuke.github.GitHub;
 import net.gcardone.junidecode.Junidecode;
 import picocli.CommandLine.Command;
 import picocli.CommandLine.Option;
-import picocli.CommandLine.Parameters;
 
 @Command(name = "get-contributors", mixinStandardHelpOptions = true)
 public class GetContributors implements Callable<Integer> {
 
     private static final Path CLONE_DIRECTORY = Path.of("get-contributors-repositories");
-    private static final Path QUARKIVERSE_CONTRIBUTORS_FILE = Path.of("quarkiverse.csv");
-    private static final Path PLATFORM_WITHOUT_QUARKIVERSE_FILE = Path.of("platform-without-quarkiverse.csv");
-    private static final Path PLATFORM_PLUS_QUARKIVERSE_FILE = Path.of("platform-plus-quarkiverse.csv");
+    private static final Path QUARKUS_CONTRIBUTORS_FILE = Path.of("contributors-quarkus.csv");
+    private static final Path QUARKIVERSE_CONTRIBUTORS_FILE = Path.of("contributors-quarkiverse.csv");
+    private static final Path PLATFORM_CONTRIBUTORS_FILE = Path.of("contributors-platform.csv");
+    private static final Path WEBSITE_TRANSLATIONS_CONTRIBUTORS_FILE = Path.of("contributors-website-translations.csv");
+    private static final Path ALL_CONTRIBUTORS_FILE = Path.of("contributors-all.csv");
 
-    private static final Map<String, String> PLATFORM_PROJECTS = Map.of(
-            "apache/camel-quarkus", ".",
-            "kiegroup/kogito-runtimes", "quarkus",
-            "kiegroup/optaplanner", "optaplanner-quarkus-integration",
-            "datastax/cassandra-quarkus", ".",
-            "amqphub/quarkus-qpid-jms", ".",
-            "hazelcast/quarkus-hazelcast-client", ".",
-            "debezium/debezium", "debezium-quarkus-outbox",
-            "Blazebit/blaze-persistence", "integration/quarkus");
+    private static final Map<String, String> PLATFORM_PROJECTS = Map.ofEntries(
+            Map.entry("quarkusio/quarkus-platform", "."),
+            Map.entry("apache/camel-quarkus", "."),
+            Map.entry("kiegroup/kogito-runtimes", "quarkus"),
+            Map.entry("kiegroup/optaplanner", "optaplanner-quarkus-integration"),
+            Map.entry("datastax/cassandra-quarkus", "."),
+            Map.entry("amqphub/quarkus-qpid-jms", "."),
+            Map.entry("hazelcast/quarkus-hazelcast-client", "."),
+            Map.entry("debezium/debezium", "debezium-quarkus-outbox"),
+            Map.entry("Blazebit/blaze-persistence", "integration/quarkus"),
+            Map.entry("quarkiverse/quarkus-operator-sdk", "."),
+            Map.entry("quarkiverse/quarkus-amazon-services", "."),
+            Map.entry("quarkiverse/quarkus-config-extensions", "consul"));
 
     private static final Set<String> IGNORE_SET = Set.of("GitHub Action", "GitHub", "debezium-builder", "Debezium Builder",
             "bsig-cloud gh bot", "Jenkins CI", "kie-ci", "Ubuntu", "quarkiversebot");
@@ -65,8 +71,11 @@ public class GetContributors implements Callable<Integer> {
     private static final DateTimeFormatter FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd")
             .withZone(ZoneId.systemDefault());
 
-    @Parameters(paramLabel = "<since>", description = "Date from which we consider the contributions")
+    @Option(names = "--since", paramLabel = "<since>", description = "Date from which we consider the contributions")
     Date since;
+
+    @Option(names = { "--main-repository-branch" }, paramLabel = "<mainRepositoryBranch>", description = "Branch of the main repository in which we consider the contributions", defaultValue = "main")
+    String mainRepositoryBranch;
 
     @Option(names = "--sort", defaultValue = "name")
     Sort sort;
@@ -78,11 +87,29 @@ public class GetContributors implements Callable<Integer> {
         }
 
         Files.createDirectory(CLONE_DIRECTORY);
+        Files.deleteIfExists(QUARKUS_CONTRIBUTORS_FILE);
         Files.deleteIfExists(QUARKIVERSE_CONTRIBUTORS_FILE);
-        Files.deleteIfExists(PLATFORM_WITHOUT_QUARKIVERSE_FILE);
-        Files.deleteIfExists(PLATFORM_PLUS_QUARKIVERSE_FILE);
+        Files.deleteIfExists(PLATFORM_CONTRIBUTORS_FILE);
+        Files.deleteIfExists(WEBSITE_TRANSLATIONS_CONTRIBUTORS_FILE);
+        Files.deleteIfExists(ALL_CONTRIBUTORS_FILE);
 
         final GitHub github = GitHub.connectAnonymously();
+
+        Map<String, Contribution> allNameContributionMap = new HashMap<>();
+        Map<String, Contribution> allEmailContributionMap = new HashMap<>();
+        List<Contribution> allContributions = new ArrayList<>();
+
+        System.out.println("Analyzing Quarkus main repository");
+
+        Map<String, Contribution> quarkusNameContributionMap = new HashMap<>();
+        Map<String, Contribution> quarkusEmailContributionMap = new HashMap<>();
+        List<Contribution> quarkusContributions = new ArrayList<>();
+
+        analyzeRepository(github.getRepository("quarkusio/quarkus"), ".", mainRepositoryBranch, since,
+                allNameContributionMap, allEmailContributionMap, allContributions,
+                quarkusNameContributionMap, quarkusEmailContributionMap, quarkusContributions);
+
+        writeContributions(quarkusContributions, QUARKUS_CONTRIBUTORS_FILE, sort);
 
         // Get Quarkiverse contributors
         List<GHRepository> quarkiverseExtensions = github.searchRepositories()
@@ -91,22 +118,20 @@ public class GetContributors implements Callable<Integer> {
                 .order(GHDirection.ASC)
                 .list().withPageSize(200).toList();
 
-        Map<String, Contribution> allNameContributionMap = new HashMap<>();
-        Map<String, Contribution> allEmailContributionMap = new HashMap<>();
-        List<Contribution> allContributions = new ArrayList<>();
-
         Map<String, Contribution> quarkiverseNameContributionMap = new HashMap<>();
         Map<String, Contribution> quarkiverseEmailContributionMap = new HashMap<>();
         List<Contribution> quarkiverseContributions = new ArrayList<>();
 
+        System.out.println("");
         System.out.println("Analyzing " + quarkiverseExtensions.size() + " Quarkiverse repositories");
 
         for (GHRepository quarkiverseExtension : quarkiverseExtensions) {
-            analyzeRepository(quarkiverseExtension, ".", allNameContributionMap, allEmailContributionMap, allContributions,
+            analyzeRepository(quarkiverseExtension, ".", "main", since,
+                    allNameContributionMap, allEmailContributionMap, allContributions,
                     quarkiverseNameContributionMap, quarkiverseEmailContributionMap, quarkiverseContributions);
         }
 
-        writeContributions(quarkiverseContributions, QUARKIVERSE_CONTRIBUTORS_FILE);
+        writeContributions(quarkiverseContributions, QUARKIVERSE_CONTRIBUTORS_FILE, sort);
 
         // Get platform projects contributors
         System.out.println("");
@@ -118,19 +143,42 @@ public class GetContributors implements Callable<Integer> {
 
         for (Entry<String, String> otherProjectEntry : PLATFORM_PROJECTS.entrySet()) {
             GHRepository repository = github.getRepository(otherProjectEntry.getKey());
-            analyzeRepository(repository, otherProjectEntry.getValue(), allNameContributionMap, allEmailContributionMap,
-                    allContributions,
+            analyzeRepository(repository, otherProjectEntry.getValue(), "main", since,
+                    allNameContributionMap, allEmailContributionMap, allContributions,
                     platformNameContributionMap, platformEmailContributionMap, platformContributions);
         }
 
-        writeContributions(platformContributions, PLATFORM_WITHOUT_QUARKIVERSE_FILE);
+        writeContributions(platformContributions, PLATFORM_CONTRIBUTORS_FILE, sort);
 
-        writeContributions(allContributions, PLATFORM_PLUS_QUARKIVERSE_FILE);
+        // Get website translations contributors
+        List<GHRepository> websiteTranslationsRepositories = github.searchRepositories()
+                .org("quarkusio")
+                .topic("translation")
+                .order(GHDirection.ASC)
+                .list().withPageSize(200).toList();
+
+        Map<String, Contribution> websiteTranslationsNameContributionMap = new HashMap<>();
+        Map<String, Contribution> websiteTranslationsEmailContributionMap = new HashMap<>();
+        List<Contribution> websiteTranslationsContributions = new ArrayList<>();
+
+        System.out.println("");
+        System.out.println("Analyzing " + websiteTranslationsRepositories.size() + " website translations repositories");
+
+        for (GHRepository websiteTranslationsRepository : websiteTranslationsRepositories) {
+            analyzeRepository(websiteTranslationsRepository, ".", "main", since,
+                    allNameContributionMap, allEmailContributionMap, allContributions,
+                    websiteTranslationsNameContributionMap, websiteTranslationsEmailContributionMap, websiteTranslationsContributions);
+        }
+
+        writeContributions(websiteTranslationsContributions, WEBSITE_TRANSLATIONS_CONTRIBUTORS_FILE, sort);
+
+        writeContributions(allContributions, ALL_CONTRIBUTORS_FILE, sort);
 
         return 0;
     }
 
-    private void analyzeRepository(GHRepository repository, String root,
+    private static void analyzeRepository(GHRepository repository, String root, String branch,
+            Date since,
             Map<String, Contribution> allNameContributionMap,
             Map<String, Contribution> allEmailContributionMap,
             List<Contribution> allContributions,
@@ -140,28 +188,54 @@ public class GetContributors implements Callable<Integer> {
         System.out.println(" > Analyzing " + repository.getFullName());
 
         Path repositoryDirectory = CLONE_DIRECTORY.resolve(repository.getName());
+        Process process;
 
-        if (Files.exists(repositoryDirectory)) {
-            System.out.println("    ... already analyzed, skipping");
-            return;
-        }
+        // if we already analyzed the repository, we don't clone it
+        // and we redirect the contributions to other maps so that it doesn't get
+        // counted twice for the contributors-all.csv file
+        boolean alreadyAnalyzed = Files.exists(repositoryDirectory);
 
-        Process process = new ProcessBuilder("git", "clone", repository.getSshUrl())
-                .directory(CLONE_DIRECTORY.toFile())
-                .start();
-        String error = new String(process.getErrorStream().readAllBytes(), StandardCharsets.UTF_8);
-        int exitCode = process.waitFor();
+        if (!alreadyAnalyzed) {
+            List<String> arguments = new ArrayList<>();
+            arguments.add("git");
+            arguments.add("clone");
+            if (!"main".equals(branch)) {
+                arguments.add("--branch");
+                arguments.add(branch);
+            }
+            arguments.add(repository.getSshUrl());
 
-        if (exitCode > 0) {
-            throw new IllegalStateException("Error cloning " + repository.getFullName() + " - exit code: "
-                    + exitCode + " - error: " + error);
+            process = new ProcessBuilder(arguments.toArray(new String[0]))
+                        .directory(CLONE_DIRECTORY.toFile())
+                        .start();
+
+            String error = new String(process.getErrorStream().readAllBytes(), StandardCharsets.UTF_8);
+            int exitCode = process.waitFor();
+
+            if (exitCode > 0) {
+                throw new IllegalStateException("Error cloning " + repository.getFullName() + " - exit code: "
+                        + exitCode + " - error: " + error);
+            }
         }
 
         Path errorFile = repositoryDirectory.resolve("error.txt");
         Path contributionsFile = repositoryDirectory.resolve("contributions.txt");
 
-        process = new ProcessBuilder("git", "--no-pager", "log", "--format=%an;%ae", "--no-merges", "--since",
-                FORMATTER.format(since.toInstant()), root)
+        List<String> arguments = new ArrayList<>();
+        arguments.add("git");
+        arguments.add("--no-pager");
+        arguments.add("log");
+        arguments.add("--format=%an;%ae");
+        arguments.add("--no-merges");
+        arguments.add("--since");
+        arguments.add(FORMATTER.format(since.toInstant()));
+        if (!"main".equals(branch)) {
+            arguments.add(branch);
+        }
+        arguments.add("--");
+        arguments.add(root);
+
+        process = new ProcessBuilder(arguments.toArray(new String[0]))
                         .directory(repositoryDirectory.toFile())
                         .redirectError(errorFile.toFile())
                         .redirectOutput(contributionsFile.toFile())
@@ -169,11 +243,14 @@ public class GetContributors implements Callable<Integer> {
 
         process.waitFor();
 
-        parseContributions(repository, contributionsFile, allNameContributionMap, allEmailContributionMap, allContributions,
+        parseContributions(repository, contributionsFile,
+                alreadyAnalyzed ? new HashMap<>() : allNameContributionMap,
+                alreadyAnalyzed ? new HashMap<>() : allEmailContributionMap,
+                alreadyAnalyzed ? new ArrayList<>() : allContributions,
                 currentNameContributionMap, currentEmailContributionMap, currentContributions);
     }
 
-    private void parseContributions(GHRepository repository,
+    private static void parseContributions(GHRepository repository,
             Path contributionsFile,
             Map<String, Contribution> allNameContributionMap,
             Map<String, Contribution> allEmailContributionMap,
@@ -185,7 +262,7 @@ public class GetContributors implements Callable<Integer> {
         for (String line : Files.readAllLines(contributionsFile)) {
             String[] tokens = line.split(";");
             String authorName = tokens[0].trim();
-            String authorEmail = tokens.length > 1 ? tokens[1].trim() : "";
+            String authorEmail = tokens.length > 1 ? tokens[1].trim().toLowerCase(Locale.ROOT) : "";
 
             if (ignore(authorName)) {
                 continue;
@@ -198,7 +275,7 @@ public class GetContributors implements Callable<Integer> {
         }
     }
 
-    private void pushContributions(GHRepository repository, String authorName, String authorEmail,
+    private static void pushContributions(GHRepository repository, String authorName, String authorEmail,
             Map<String, Contribution> nameContributionMap,
             Map<String, Contribution> emailContributionMap,
             List<Contribution> contributions) {
@@ -218,7 +295,18 @@ public class GetContributors implements Callable<Integer> {
             } else if (contribution.email.isBlank()) {
                 contribution.email = authorEmail;
                 contribution.username = "";
-                emailContributionMap.put(authorEmail, contribution);
+
+                Contribution sameEmailContribution = emailContributionMap.get(contribution.email);
+                if (sameEmailContribution != null) {
+                    sameEmailContribution.author = sameEmailContribution.author.length() > authorName.length() ? sameEmailContribution.author : authorName;
+                    sameEmailContribution.commits += contribution.commits;
+                    sameEmailContribution.username = "";
+
+                    contributions.remove(contribution);
+                    nameContributionMap.put(normalizedAuthorName, sameEmailContribution);
+                } else {
+                    emailContributionMap.put(authorEmail, contribution);
+                }
             } else {
                 emailContributionMap.put(authorEmail, contribution);
             }
@@ -248,7 +336,7 @@ public class GetContributors implements Callable<Integer> {
         }
     }
 
-    private void writeContributions(List<Contribution> contributions, Path file) throws IOException {
+    private static void writeContributions(List<Contribution> contributions, Path file, Sort sort) throws IOException {
         sort.sort(contributions);
 
         Files.write(file,
@@ -265,7 +353,7 @@ public class GetContributors implements Callable<Integer> {
         }
     }
 
-    private boolean ignore(String username) {
+    private static boolean ignore(String username) {
         if (username.contains(BOT)) {
             return true;
         }
@@ -277,11 +365,11 @@ public class GetContributors implements Callable<Integer> {
         return false;
     }
 
-    private boolean isNoReply(String email) {
+    private static boolean isNoReply(String email) {
         return email.contains(NO_REPLY);
     }
 
-    private String extractUsername(String email) {
+    private static String extractUsername(String email) {
         String username = email.substring(0, email.indexOf('@'));
         if (username.contains("+")) {
             username = username.substring(email.indexOf('+') + 1);
@@ -289,7 +377,7 @@ public class GetContributors implements Callable<Integer> {
         return username;
     }
 
-    public class Contribution {
+    public static class Contribution {
 
         public String author;
         public String email;
